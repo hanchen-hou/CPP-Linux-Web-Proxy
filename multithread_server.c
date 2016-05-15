@@ -16,76 +16,82 @@
 #define MAX_FILE_NAME_SIZE 255
 #define BLOCK_LIST_FILE "block_list.txt"
 
+// Create a new socket and bind to target port.
+// Listen the target port and accept connections in multi-threads
 int socket_listener(int port_num, int backlog) {
 
-  //Socket 
+  // Socket 
   int socket_desc;
 
+  //AF_INET -> use Ipv4
+  // SOCK_STREAM -> socket type
   socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_desc == -1) {
     printf("Could not create socket");
     return 1;
   }
     
-  //Bind
+  // Bind
   struct sockaddr_in server;
   server.sin_family = AF_INET;
-  server.sin_addr.s_addr = INADDR_ANY;
+  server.sin_addr.s_addr = INADDR_ANY; // inet_addr("0.0.0.0")
   server.sin_port = htons(port_num);
-   
+  
   if ( bind(socket_desc, (struct sockaddr *) &server, sizeof(server)) < 0) {
     perror("bind failed\n");
     return 1;
   }
     
-  //Listen
+  // Listen
   listen(socket_desc, backlog);        
   printf("waiting for incoming connection\n");
     
-  //Create 2 worker threads
+  // Create threads
   pthread_t tid[THREAD_NUM];
   int err;
   for (int i = 0; i < THREAD_NUM; i++) {
     err = pthread_create(&tid[i], NULL, &connection_handler, (void*) &socket_desc);
   }
+
+  // Wait threads to be done
   for (int i = 0; i < THREAD_NUM; i++) {  
     pthread_join(tid[i], NULL);
   }
 }
 
+// Call by thread
+// Accept from socket listener
+// Note: the whole request & response procedure are executed in this method
 void* connection_handler(void* socket_desc) {
-  //Accept
+  // Accept
   int client_sock, c;
   struct sockaddr_in client;
   while ((client_sock = accept( *(int*) socket_desc, (struct sockaddr *) &client, (socklen_t*) &c))) {
-
-    //set timeout
-    //struct timeval tv = {3,0}; //3s + 0milli-sec
-    //setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
     
     struct Request* req = new_request();
     struct Response* resp = new_response();
 
-    //Get Request From Client
+    // Get Request From Client
     get_request_from_client(client_sock, req);
 
-    //Check block list
+    // Check block list
     if(!is_blocked(client_sock, req)){
 
+      // Check cache
       if(!has_cache(client_sock, req)){
-	  //Connect To Server
+	  // Connect To Server
 	  int socket_to_server = connect_to_server(req);
 
-	  //Send Request To Server 
+	  // Send Request To Server 
 	  send_request_to_server(socket_to_server, req);
     
-	  //Get Response From Server
+	  // Get Response From Server
 	  fetch_server_data(socket_to_server, resp);
 
-	  //save cache
+	  // Save cache
 	  save_cache(req, resp);
 	  
-	  //Send Response To Client
+	  // Send Response To Client
 	  send_reponse_to_client(client_sock, resp);
 
 	  close(socket_to_server);
@@ -166,6 +172,7 @@ void parse_request(struct Request* req){
   //printf("%s\n", req->port);
 }
 
+// If find the address in the blocklist, return 404
 int is_blocked(int client_sock, struct Request* req){
   FILE* fp;
   char* line = NULL;
@@ -176,16 +183,19 @@ int is_blocked(int client_sock, struct Request* req){
   fp = fopen(BLOCK_LIST_FILE, "r");
   if(fp == NULL) perror("cannot open block list.\n");
 
+  // read each line
   while (getline(&line, &len, fp) != EOF) {
     char keyword[100];
-    memset(keyword, '\0', sizeof(keyword));
+    memset(keyword, '\0', sizeof(keyword)); // init 'keyword[100]'
+
+    //copy one 'line' to 'keyword' except \n(line feed) and \r(return)
     for(int i = 0; line[i] != '\0' && line[i] != '\n' && line[i] != '\r'; i++){
       keyword[i] = line[i];
     }
-    //printf("%s\n", keyword);
 
+    // search 'keyword' in the 'req->host'
     if(strlen(keyword)>0 && strstr(req->host, keyword) != NULL){
-      printf("block -> %s\n", keyword);
+      printf("block -> %s\n", keyword); // print log
       char not_found_response[] = "HTTP/1.1 404 Not Found\n\n";
       //find it
       write(client_sock, not_found_response, sizeof(not_found_response));
@@ -253,36 +263,37 @@ int connect_to_server(struct Request* req){
   struct addrinfo *host_info_list; // Pointer to the to the linked list of host_info's.
  
   // The MAN page of getaddrinfo() states "All  the other fields in the structure pointed
-  // to by hints must contain either 0 or a null pointer, as appropriate." When a struct 
-  // is created in C++, it will be given a block of memory. This memory is not necessary
-  // empty. Therefor we use the memset function to make sure all fields are NULL.     
-  memset(&host_info, 0, sizeof host_info);
+  // to by hints must contain either 0 or a null pointer, as appropriate." 
+  // Init 'host_info', set all bytes to 0
+  memset(&host_info, 0, sizeof(host_info));
 
-  host_info.ai_family = AF_UNSPEC;     // IP version not specified. Can be both.
-  host_info.ai_socktype = SOCK_STREAM; // Use SOCK_STREAM for TCP or SOCK_DGRAM for UDP.
-
-  //printf("Setting up the structs...\n");
+  // ai_family: the type of IP version we want the server to return
+  // IP version not specified. Can be both. (AF_INET -> IPv4 & AF_INET6 -> IPv6)
+  host_info.ai_family = AF_UNSPEC;
   
-  // Now fill up the linked list of host_info structs with google's address information.
+  // Use SOCK_STREAM for TCP or SOCK_DGRAM for UDP.
+  host_info.ai_socktype = SOCK_STREAM; 
+  
+  // Get address info
   status = getaddrinfo(req->host, req->port, &host_info, &host_info_list);
+  // getaddrinfo returns 0 on succes, or some other value when an error occured.
+  // (translated into human readable text by the gai_strerror function).
   if(status != 0){
-    printf("%s\n", gai_strerror(status));
+    printf("Cannot get target address info. Error:%s\n", gai_strerror(status));
     exit(1);
   }
-  // getaddrinfo returns 0 on succes, or some other value when an error occured.
-  // (translated into human readable text by the gai_gai_strerror function).
 
-  //printf("Creating a socket...\n");
+  // open a new socket
   int socket_to_server = socket(host_info_list->ai_family, host_info_list->ai_socktype, host_info_list->ai_protocol);
-  if (socket_to_server == -1)  perror("socket error\n") ;
+  if (socket_to_server == -1) {
+    perror("socket error\n");
+  }
 
-  //printf("Connecting to server...\n\n");
+  // connect to server
   status = connect(socket_to_server, host_info_list->ai_addr, host_info_list->ai_addrlen);
-  if (status == -1)  perror("connect error\n");
-
-  //set timeout
-  //struct timeval tv = {10,0}; //3s + 0milli-sec
-  //setsockopt(socket_to_server, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
+  if (status == -1) {
+    perror("connect error\n");
+  }
   
   return socket_to_server;
 }
@@ -292,18 +303,20 @@ void send_request_to_server(int socket_to_server, struct Request* req){
 }
 
 void fetch_server_data(int socket_to_server, struct Response* resp){
-  char recv_data_buf[800*1024];
+  char recv_data_buf[800*1024]; // 800 kb 
   memset(recv_data_buf, '\0',sizeof(recv_data_buf));
   int recv_size = 0;
+  
   do{
     recv_size = recv(socket_to_server, recv_data_buf, sizeof(recv_data_buf), MSG_WAITALL);
 
     if(resp->data == NULL){
-      resp->data_size = recv_size + 1; //must have 1 more size large
+      resp->data_size = recv_size + 1;
       resp->data = malloc(resp->data_size);
       memset(resp->data,'\0',resp->data_size);
       memcpy(resp->data, recv_data_buf, recv_size);
     }else{
+      //expand
       resp->data = realloc(resp->data, resp->data_size+recv_size);
       memset(resp->data+resp->data_size, '\0', recv_size);
       memcpy(resp->data+resp->data_size, recv_data_buf, recv_size);
@@ -322,8 +335,8 @@ void fetch_server_data(int socket_to_server, struct Response* resp){
 
   resp->header_size++; //for the last extra 0 
   resp->header = malloc(resp->header_size);
-  memset(resp->header, '\0', resp->header_size);
-  memcpy(resp->header, resp->data, resp->header_size - 1); //keep the last byte be 0, need "- 1"
+  memset(resp->header, '\0', resp->header_size); //the response header is a char array, leave the last byte to be \0
+  memcpy(resp->header, resp->data, resp->header_size - 1); //keep the last byte be \0, need "-1"
 }
 
 void save_cache(struct Request* req, struct Response* resp){
